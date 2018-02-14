@@ -124,10 +124,6 @@ tileCount <- function(reads,
     
     if (isPE)
     {
-        ## gal is a list of list with length 1 or 2
-        lib.size.chrom <- 
-                                                          ## due to unpaired alignments
-        
         ## get count of fragments for each sliding window: a list 
         pe <- lapply(reads, function(x) 
         {
@@ -144,7 +140,6 @@ tileCount <- function(reads,
         }
     } else
     {
-        gal <- lapply(reads, readBamFile, what=c("seq"), asMates = FALSE)  ## gal is a list of list with length 1
         ## get count of fragments for each sliding window
         se <- lapply(reads, function(x)
         {
