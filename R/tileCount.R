@@ -2,13 +2,12 @@
 #'
 #' Count reads overlapping a set of genimc features represented as
 #' genomic ranges. This function does not work for parallel.
-#'
 #' @param features A object of \link[GenomicRanges]{GRanges} representing the
 #' feature regions to be counted.
 #' @param reads An object that represents the data to be counted. See
 #' \link[GenomicAlignments]{summarizeOverlaps}. If reads are more than 1 bam files,
 #' it should be a vector of character with full path, otherwise current working directory 
-#' is the default directory.
+#' is the default directory. For paired end reads, 
 #' @param ignore.strand logical(1). ignore strand?
 #' @param inter.feature not used. This parameter is required by
 #' \link[GenomicAlignments]{summarizeOverlaps}.
@@ -66,6 +65,7 @@ IntersectionNotStrict <-function(features,
 #' @importFrom IRanges IRanges elementNROWS
 #' @importFrom BiocGenerics lengths table
 #' @importFrom methods as
+#' @importFrom ATACseqQC readBamFile
 #' @export
 #' @examples
 #' \dontrun{
@@ -93,6 +93,7 @@ tileCount <- function(reads,
                       dataOverSamples = FALSE,
                       ...) 
 {
+    ## get sliding windows with size = windowSize and step = step
     targetRegions <- as(seqinfo(genome), "GRanges")
     tileTargetRegions <-slidingWindows(x = targetRegions,
                                        width = windowSize,
@@ -101,54 +102,62 @@ tileCount <- function(reads,
     tileTargetRegions <- unlist(tileTargetRegions)
     mcols(tileTargetRegions)$oid <- rep(seq_along(targetRegions),tileTargetRegionsLen)
     
-    if (inherits(reads, "GRangesList") && dataOverSamples) 
+    ## read in BAM files in paired  or single end mode if the input is paired end reads or SE, 
+    ## respectively using the readBamFile function in the ATACseqQC package. The output will be
+    isPE <- testPairedEndBam(reads[1])
+    
+    ## get fragment counts per chromosome
+    countByChr <- function(algns)
     {
-        se <- do.call(cbind,lapply(reads,
-                                   summarizeOverlaps,
-                                   features = tileTargetRegions,
-                                   inter.feature = FALSE,
-                                   mode = mode,
-                                   ...))
-        if (length(names(reads)) == ncol(se)) {colnames(se) <- names(reads)}
-        lib.size.chrom <- t(BiocGenerics::table(seqnames(reads)))
-        lib.size.chrom <- cbind(rownames(lib.size.chrom), lib.size.chrom)
-        colnames(lib.size.chrom) <- c("chrom", paste("lib.size", 1:length(reads), sep = "."))
-    } else {
-                if (inherits(reads, "GRangesList")) 
-                {
-                    ol <- lapply(head(reads, 100), findOverlaps, drop.redundant = TRUE, drop.self = TRUE)
-                    if (any(lengths(ol))) 
-                    {
-                        stop("reads are GRangesList with overlaps in elements.",
-                                "Please try to set dataOverSamples as TRUE.")
-                    }
-                    lib.size.chrom <- as.data.frame(rowSums(t(BiocGenerics::table(seqnames(reads)))))
-                    lib.size.chrom <- cbind(rownames(lib.size.chrom), lib.size.chrom)
-                    colnames(lib.size.chrom) <- c("chrom", "lib.size")
-                } else if (inherits(reads, "GRanges")) 
-                {
-                    lib.size.chrom <- as.data.frame(BiocGenerics::table(seqnames(reads)))
-                    colnames(lib.size.chrom) <- c("chrom", "lib.size")
-                } else {
-                            ## the scanbam function canonly read a single bam file not a list of bamfiles at a time
-                            ## so for a list bamfiles, I modify the code as follows
-                            ## aln is a list of list of lists
-                            aln <- lapply(reads, scanBam)
-                            lib.size.chrom <- do.call(cbind, 
-                                                    lapply(1:length(aln),function(i) 
-                                                    {
-                                                        countByChr = as.data.frame(BiocGenerics::table(aln[[i]][[1]]$rname))[, 2, drop =FALSE]
-                                                        ## using the bamfile names to name the column derived from a give bamfiles
-                                                        colnames(countByChr) <- reads[i]
-                                                        countByChr
-                                                    }))
-                        }
-                        se <- summarizeOverlaps(features = tileTargetRegions,
-                                                reads = reads,
-                                                mode = mode,
-                                                inter.feature = FALSE, ...)
+        fragments <- lapply(algns, function (pairedAlignmentItems) {unique(pairedAlignmentItems@seqnames)}) 
+        countFreqByChr <- as.data.frame(table(unlist(fragments)))
+        countFreqByChr
     }
-    names(assays(se)) <- "counts"
-    metadata(se)$lib.size.chrom <- lib.size.chrom
-    se
+    
+    ## add names and metadata to a RangedSummarizedExperiment object
+    addNamesAndMetadata <- function(rse, lib.size.chrom)
+    {
+        names(assays(rse)) <- "counts"
+        metadata(rse)$lib.size.chrom <- lib.size.chrom
+        rse
+    }
+    
+    if (isPE)
+    {
+        ## gal is a list of list with length 1 or 2
+        lib.size.chrom <- 
+                                                          ## due to unpaired alignments
+        
+        ## get count of fragments for each sliding window: a list 
+        pe <- lapply(reads, function(x) 
+        {
+            peCount <- summarizeOverlaps(features = tileTargetRegions,
+                                         reads = x,
+                                         mode = mode,
+                                         singleEnd = FALSE,
+                                         fragments = TRUE,
+                                         inter.feature = FALSE, ...)
+            GAlignmentList <- readBamFile(bamFile = x, what=c("seq"), asMates = TRUE)
+            lib.size.chrom <- countByChr(GAlignmentList)
+            peCount <- addNamesAndMetadata(peCount, lib.size.chrom)
+            peCount
+        }
+    } else
+    {
+        gal <- lapply(reads, readBamFile, what=c("seq"), asMates = FALSE)  ## gal is a list of list with length 1
+        ## get count of fragments for each sliding window
+        se <- lapply(reads, function(x)
+        {
+            seCount <- summarizeOverlaps(features = tileTargetRegions,
+                                         reads = x,
+                                         mode = mode,
+                                         singleEnd = TRUE,
+                                         inter.feature = FALSE, ...)
+            GAlignmentList <- readBamFile(bamFile = x, what=c("seq"), asMates = FALSE)
+            lib.size.chrom <- countByChr(GAlignmentList)
+            
+            seCount <- addNamesAndMetadata(seCount, lib.size.chrom)
+            seCount
+        }
+    }
 }
